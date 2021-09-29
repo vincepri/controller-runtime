@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
@@ -264,6 +265,10 @@ type Options struct {
 	// +optional
 	Controller v1alpha1.ControllerConfigurationSpec
 
+	// RunnableRetryBackoff, if set, instructs the manager to retry to start runnables
+	// if an error occurs and only fail after a certain amount of time.
+	RunnableRetryBackoff *wait.Backoff
+
 	// makeBroadcaster allows deferring the creation of the broadcaster to
 	// avoid leaking goroutines if we never call Start on this manager.  It also
 	// returns whether or not this is a "owned" broadcaster, and as such should be
@@ -388,6 +393,7 @@ func New(config *rest.Config, options Options) (Manager, error) {
 		internalProceduresStop:        make(chan struct{}),
 		leaderElectionStopped:         make(chan struct{}),
 		leaderElectionReleaseOnCancel: options.LeaderElectionReleaseOnCancel,
+		runnableRetryBackoff:          options.RunnableRetryBackoff,
 	}, nil
 }
 

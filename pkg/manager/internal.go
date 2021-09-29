@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -159,6 +160,10 @@ type controllerManager struct {
 	// retryPeriod is the duration the LeaderElector clients should wait
 	// between tries of actions.
 	retryPeriod time.Duration
+
+	// runnableRetryBackoff, if set, instructs the manager to retry to start runnables
+	// if an error occurs and only fail after a certain amount of time.
+	runnableRetryBackoff *wait.Backoff
 
 	// waitForRunnable is holding the number of runnables currently running so that
 	// we can wait for them to exit before quitting the manager
@@ -693,7 +698,29 @@ func (cm *controllerManager) startRunnable(r Runnable) {
 	cm.waitForRunnable.Add(1)
 	go func() {
 		defer cm.waitForRunnable.Done()
-		if err := r.Start(cm.internalCtx); err != nil {
+
+		// If there is no retry backoff, keep old logic to return right away.
+		if cm.runnableRetryBackoff == nil {
+			if err := r.Start(cm.internalCtx); err != nil {
+				cm.errChan <- err
+			}
+			return
+		}
+
+		// If we should wait and run into exponential backoff, call Start multiple
+		// times until it either suceeds, or the backoff expires.
+		var lastError error
+		if err := wait.ExponentialBackoffWithContext(cm.internalCtx, *cm.runnableRetryBackoff, func() (bool, error) {
+			if err := r.Start(cm.internalCtx); err != nil {
+				lastError = err
+				return false, nil
+			}
+			return true, nil
+		}); err != nil {
+			if lastError != nil {
+				cm.errChan <- fmt.Errorf("failed to run runnable, %s: %w", err, lastError)
+				return
+			}
 			cm.errChan <- err
 		}
 	}()

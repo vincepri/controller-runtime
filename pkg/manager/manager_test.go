@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	configv1alpha1 "k8s.io/component-base/config/v1alpha1"
@@ -999,6 +1000,69 @@ var _ = Describe("manger.Manager", func() {
 				<-runnableStopped
 			})
 
+			It("should wait for runnables if exponential backoff is set", func() {
+				m, err := New(cfg, options)
+				Expect(err).NotTo(HaveOccurred())
+				for _, cb := range callbacks {
+					cb(m)
+				}
+				m.(*controllerManager).runnableRetryBackoff = &wait.Backoff{
+					Duration: 10 * time.Millisecond,
+					Steps:    5,
+					Jitter:   1.0,
+				}
+
+				called := 0
+				runnableStopped := make(chan struct{})
+				now := time.Now()
+				Expect(m.Add(RunnableFunc(func(ctx context.Context) error {
+					called++
+					if time.Now().Sub(now).Milliseconds() > 30 {
+						close(runnableStopped)
+						return nil
+					}
+					return errors.New("not yet")
+				}))).ToNot(HaveOccurred())
+
+				ctx, cancel := context.WithCancel(context.Background())
+				managerStopDone := make(chan struct{})
+				go func() {
+					Expect(m.Start(ctx)).NotTo(HaveOccurred())
+					close(managerStopDone)
+				}()
+				<-runnableStopped
+				<-m.(*controllerManager).elected
+				cancel()
+
+				Expect(called).To(BeNumerically(">=", 1))
+			})
+
+			It("should error when if a runnable takes too long to run and backoff is enabled", func() {
+				m, err := New(cfg, options)
+				Expect(err).NotTo(HaveOccurred())
+				for _, cb := range callbacks {
+					cb(m)
+				}
+				m.(*controllerManager).runnableRetryBackoff = &wait.Backoff{
+					Duration: 10 * time.Millisecond,
+					Steps:    5,
+					Jitter:   1.0,
+				}
+
+				now := time.Now()
+				Expect(m.Add(RunnableFunc(func(ctx context.Context) error {
+					if time.Now().Sub(now).Milliseconds() > 100 {
+						return nil
+					}
+					return errors.New("not yet")
+				}))).ToNot(HaveOccurred())
+
+				ctx, cancel := context.WithCancel(context.Background())
+				err = m.Start(ctx)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("not yet"))
+				cancel()
+			})
 		}
 
 		Context("with defaults", func() {
